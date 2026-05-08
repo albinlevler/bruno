@@ -227,10 +227,21 @@ class CodeEditor extends React.Component {
 
       const getAllVariablesHandler = () => getAllVariables(this.props.collection, this.props.item);
 
-      // Setup AutoComplete Helper for all modes
+      // Setup AutoComplete Helper for all modes. The `getDynamicHints` option
+      // lets a parent component provide context-aware hints (e.g., gRPC proto
+      // field/enum-value completion) that take precedence over the default
+      // variable/anyword path when they have suggestions to offer.
+      const getDynamicHintsHandler = (cm) => {
+        if (typeof this.props.getDynamicHints === 'function') {
+          return this.props.getDynamicHints(cm);
+        }
+        return null;
+      };
+
       const autoCompleteOptions = {
         showHintsFor: this.props.showHintsFor,
-        getAllVariables: getAllVariablesHandler
+        getAllVariables: getAllVariablesHandler,
+        getDynamicHints: getDynamicHintsHandler
       };
 
       this.brunoAutoCompleteCleanup = setupAutoComplete(

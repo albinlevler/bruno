@@ -707,6 +707,20 @@ const handleKeyupForAutocomplete = (cm, event, options) => {
     return;
   }
 
+  // Dynamic hint provider runs first. If it returns a non-empty hint object,
+  // we use that and skip the standard variable/anyword path entirely.
+  // Otherwise fall through so {{var}} completion still works in JSON strings.
+  if (typeof options.getDynamicHints === 'function') {
+    const dynamicHints = options.getDynamicHints(cm);
+    if (dynamicHints && Array.isArray(dynamicHints.list) && dynamicHints.list.length > 0) {
+      cm.showHint({
+        hint: () => dynamicHints,
+        completeSingle: false
+      });
+      return;
+    }
+  }
+
   const allVariables = options.getAllVariables?.() || {};
   const anywordAutocompleteHints = options.getAnywordAutocompleteHints?.() || [];
   const hints = getAutoCompleteHints(cm, allVariables, anywordAutocompleteHints, options);

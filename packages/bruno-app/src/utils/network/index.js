@@ -209,6 +209,26 @@ export const generateGrpcSampleMessage = async (methodPath, existingMessage = nu
   });
 };
 
+/**
+ * Fetch a JSON-friendly proto schema for a gRPC method. Used by the message
+ * editor to drive field-name and enum-value autocomplete.
+ * @param {string} methodPath
+ * @param {Object} options - May include methodMetadata to bypass the main-process cache.
+ * @returns {Promise<{success: boolean, schema?: Object, error?: string}>}
+ */
+export const getGrpcMethodSchema = async (methodPath, options = {}) => {
+  const { ipcRenderer } = window;
+  const result = await ipcRenderer.invoke('grpc:get-method-schema', { methodPath, options });
+  if (result?.success && typeof result.schema === 'string') {
+    try {
+      return { success: true, schema: JSON.parse(result.schema) };
+    } catch (e) {
+      return { success: false, error: 'Failed to parse schema response' };
+    }
+  }
+  return result;
+};
+
 export const connectWS = async (item, collection, environment, runtimeVariables, options) => {
   return new Promise((resolve, reject) => {
     startWsConnection(item, collection, environment, runtimeVariables, options)

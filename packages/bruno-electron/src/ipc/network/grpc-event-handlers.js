@@ -439,6 +439,21 @@ const registerGrpcEventHandlers = (window) => {
     }
   });
 
+  // Get a JSON-friendly proto schema for a method, used by the message editor
+  // to drive field-name and enum-value autocomplete.
+  ipcMain.handle('grpc:get-method-schema', async (event, { methodPath, options = {} }) => {
+    try {
+      const result = grpcClient.getMethodSchema(methodPath, options);
+      if (!result.success) {
+        return { success: false, error: result.error || 'Failed to get method schema' };
+      }
+      return { success: true, schema: JSON.stringify(result.schema) };
+    } catch (error) {
+      console.error('Error extracting gRPC method schema:', error);
+      return { success: false, error: error.message || 'Failed to get method schema' };
+    }
+  });
+
   // Generate grpcurl command for a request
   ipcMain.handle('grpc:generate-grpcurl', async (event, { request, collection, environment, runtimeVariables }) => {
     try {

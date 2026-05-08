@@ -1,10 +1,10 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { get } from 'lodash';
 import { useDispatch, useSelector } from 'react-redux';
 import { useTheme } from 'providers/Theme';
 import { updateRequestBody } from 'providers/ReduxStore/slices/collections';
 import { saveRequest } from 'providers/ReduxStore/slices/collections/actions';
-import { sendGrpcMessage, generateGrpcSampleMessage } from 'utils/network/index';
+import { sendGrpcMessage, generateGrpcSampleMessage, getGrpcMethodSchema } from 'utils/network/index';
 import useLocalStorage from 'hooks/useLocalStorage';
 
 import CodeEditor from 'components/CodeEditor/index';
@@ -17,6 +17,8 @@ import { toastError } from 'utils/common/error';
 import toast from 'react-hot-toast';
 import { getAbsoluteFilePath } from 'utils/common/path';
 import { prettifyJsonString } from 'utils/common/index';
+import { jsonPathAtCursor } from 'utils/codemirror/jsonPathAtCursor';
+import { protoSchemaLookup } from 'utils/grpc/protoSchemaLookup';
 
 const MessageToolbar = ({
   index,
@@ -84,6 +86,73 @@ const SingleGrpcMessage = ({ message, item, collection, index, methodType, handl
   const canClientStream = methodType === 'client-streaming' || methodType === 'bidi-streaming';
   const { name, content } = message;
 
+  const methodPath = item.draft?.request?.method || item.request?.method;
+  const requestUrl = item.draft?.request?.url || item.request?.url;
+  const protoPath = item.draft?.request?.protoPath || item.request?.protoPath;
+
+  // Resolve the cached method-metadata object that powers both sample-message
+  // generation and proto autocomplete.
+  const methodMetadata = useMemo(() => {
+    if (!methodPath) return null;
+    if (protoPath) {
+      const absolutePath = getAbsoluteFilePath(collection.pathname, protoPath);
+      const cachedMethods = protofileCache[absolutePath];
+      if (cachedMethods) {
+        return cachedMethods.find((m) => m.path === methodPath) || null;
+      }
+    } else if (requestUrl) {
+      const cachedMethods = reflectionCache[requestUrl];
+      if (cachedMethods) {
+        return cachedMethods.find((m) => m.path === methodPath) || null;
+      }
+    }
+    return null;
+  }, [methodPath, requestUrl, protoPath, protofileCache, reflectionCache, collection.pathname]);
+
+  // Lazy-fetched proto schema for the current method, used to drive
+  // field-name and enum-value autocomplete in the editor.
+  const [protoSchema, setProtoSchema] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    setProtoSchema(null);
+    if (!methodPath || !methodMetadata) return undefined;
+    getGrpcMethodSchema(methodPath, { methodMetadata })
+      .then((res) => {
+        if (cancelled) return;
+        if (res?.success && res.schema) setProtoSchema(res.schema);
+      })
+      .catch(() => {
+        // Autocomplete is best-effort; failure here just means the editor
+        // continues with only Bruno's variable/anyword hints.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [methodPath, methodMetadata]);
+
+  const getDynamicHints = useCallback(
+    (cm) => {
+      if (!protoSchema) return null;
+      const cursorInfo = jsonPathAtCursor(cm);
+      if (!cursorInfo) return null;
+      const lookup = protoSchemaLookup(protoSchema, cursorInfo);
+      if (!lookup) return null;
+
+      const prefix = (cursorInfo.prefix || '').toLowerCase();
+      const startsWith = [];
+      const includes = [];
+      for (const candidate of lookup.candidates) {
+        const lower = candidate.toLowerCase();
+        if (lower.startsWith(prefix)) startsWith.push(candidate);
+        else if (prefix && lower.includes(prefix)) includes.push(candidate);
+      }
+      const list = prefix ? [...startsWith, ...includes] : lookup.candidates;
+      if (list.length === 0) return null;
+      return { list, from: cursorInfo.from, to: cursorInfo.to };
+    },
+    [protoSchema]
+  );
+
   const onEdit = (value) => {
     const currentMessages = [...(body.grpc || [])];
     currentMessages[index] = {
@@ -109,27 +178,9 @@ const SingleGrpcMessage = ({ message, item, collection, index, methodType, handl
 
   const onRegenerateMessage = async () => {
     try {
-      const methodPath = item.draft?.request?.method || item.request?.method;
       if (!methodPath) {
         toastError(new Error('Method path not found in request'));
         return;
-      }
-
-      const url = item.draft?.request?.url || item.request?.url;
-      const protoPath = item.draft?.request?.protoPath || item.request?.protoPath;
-
-      let methodMetadata = null;
-      if (protoPath) {
-        const absolutePath = getAbsoluteFilePath(collection.pathname, protoPath);
-        const cachedMethods = protofileCache[absolutePath];
-        if (cachedMethods) {
-          methodMetadata = cachedMethods.find((method) => method.path === methodPath);
-        }
-      } else if (url) {
-        const cachedMethods = reflectionCache[url];
-        if (cachedMethods) {
-          methodMetadata = cachedMethods.find((method) => method.path === methodPath);
-        }
       }
 
       const result = await generateGrpcSampleMessage(methodPath, content, {
@@ -215,6 +266,7 @@ const SingleGrpcMessage = ({ message, item, collection, index, methodType, handl
           enableVariableHighlighting={true}
           initialScroll={grpcScroll}
           onScroll={setGrpcScroll}
+          getDynamicHints={getDynamicHints}
         />
       </div>
     </div>

@@ -2,6 +2,7 @@ import { makeGenericClientConstructor, ChannelCredentials, Metadata, status, cre
 import { GrpcReflection } from 'grpc-js-reflection-client';
 import * as protoLoader from '@grpc/proto-loader';
 import { generateGrpcSampleMessage } from './grpcMessageGenerator';
+import { extractGrpcMethodSchema } from './grpcSchemaExtractor';
 import * as tls from 'tls';
 import { isString } from 'lodash';
 import * as nodePath from 'node:path';
@@ -929,6 +930,39 @@ class GrpcClient {
       return {
         success: false,
         error: error.message || 'Failed to generate sample message'
+      };
+    }
+  }
+
+  /**
+   * Extract a JSON-friendly schema for a method (request type's reachable
+   * messages and enums), used to power autocomplete in the gRPC body editor.
+   * @param {string} methodPath - The full gRPC method path
+   * @param {Object} options - Optional. May include methodMetadata to bypass internal cache.
+   * @returns {Object} { success, schema } or { success: false, error }
+   */
+  getMethodSchema(methodPath, options = {}) {
+    try {
+      let method;
+      if (options.methodMetadata) {
+        method = options.methodMetadata;
+      } else {
+        if (!this.methods.has(methodPath)) {
+          return {
+            success: false,
+            error: `Method ${methodPath} not found in cache, please refresh the methods`
+          };
+        }
+        method = this.methods.get(methodPath);
+      }
+
+      const schema = extractGrpcMethodSchema(method);
+      return { success: true, schema };
+    } catch (error) {
+      console.error('Error extracting gRPC method schema:', error);
+      return {
+        success: false,
+        error: error.message || 'Failed to extract method schema'
       };
     }
   }

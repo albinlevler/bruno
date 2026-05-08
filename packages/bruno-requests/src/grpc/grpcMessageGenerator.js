@@ -1,78 +1,127 @@
 import { faker } from '@faker-js/faker';
+import { buildDescriptorMaps, isMapEntry, resolveType } from './grpcDescriptorUtils';
+
+const generateScalarValue = (fieldType) => {
+  switch (fieldType) {
+    case 'TYPE_DOUBLE':
+    case 'TYPE_FLOAT':
+      return faker.number.float({ min: 0, max: 1000, precision: 0.01 });
+    case 'TYPE_INT32':
+    case 'TYPE_INT64':
+    case 'TYPE_SINT32':
+    case 'TYPE_SINT64':
+    case 'TYPE_UINT32':
+    case 'TYPE_UINT64':
+    case 'TYPE_FIXED32':
+    case 'TYPE_FIXED64':
+      return faker.number.int({ min: 0, max: 1000 });
+    case 'TYPE_BOOL':
+      return faker.datatype.boolean();
+    case 'TYPE_STRING':
+      return faker.lorem.word();
+    case 'TYPE_BYTES':
+      return Buffer.from(faker.string.alpha({ length: { min: 5, max: 10 } })).toString('base64');
+    default:
+      return faker.lorem.word();
+  }
+};
+
+const resolveMessage = (typeName, ctx) => {
+  const resolved = resolveType(typeName, ctx.scope, ctx.messageMap);
+  return resolved && resolved.kind === 'message' ? resolved : null;
+};
+
+const generateNestedMessage = (field, options, ctx) => {
+  const resolved = resolveMessage(field.typeName, ctx);
+  if (resolved && !ctx.expanding.has(resolved.fqn)) {
+    ctx.expanding.add(resolved.fqn);
+    const previousScope = ctx.scope;
+    ctx.scope = resolved.fqn;
+    const value = generateSampleMessageFromFields(resolved.descriptor.field, options, ctx);
+    ctx.scope = previousScope;
+    ctx.expanding.delete(resolved.fqn);
+    return value;
+  }
+  // Legacy fallback path: kept in case an upstream caller pre-populates messageType.field
+  if (field.messageType && field.messageType.field) {
+    return generateSampleMessageFromFields(field.messageType.field, options, ctx);
+  }
+  return {};
+};
+
+const generateSingleFieldValue = (field, options, ctx) => {
+  if (field.type === 'TYPE_MESSAGE') {
+    return generateNestedMessage(field, options, ctx);
+  }
+  if (field.type === 'TYPE_ENUM') {
+    return 0;
+  }
+  return generateScalarValue(field.type);
+};
 
 /**
  * Generates a sample message based on method parameter fields
  * @param {Object} fields - Method parameter fields
  * @param {Object} options - Generation options
+ * @param {Object} [ctx] - Internal context: { messageMap, expanding, scope }
  * @returns {Object} Generated message
  */
-const generateSampleMessageFromFields = (fields, options = {}) => {
+const generateSampleMessageFromFields = (fields, options = {}, ctx) => {
   const result = {};
 
   if (!fields || !Array.isArray(fields)) {
     return {};
   }
 
-  fields.forEach((field) => {
-    // Generate a value based on field name and type
-    if (field.type === 'TYPE_MESSAGE') {
-      // Handle nested message
-      if (field.messageType && field.messageType.field) {
-        if (field.label === 'LABEL_REPEATED') {
-          // Generate array of nested messages
-          const count = options.arraySize || faker.number.int({ min: 1, max: 3 });
-          result[field.name] = Array.from({ length: count }, () =>
-            generateSampleMessageFromFields(field.messageType.field, options)
-          );
-        } else {
-          // Generate single nested message
-          result[field.name] = generateSampleMessageFromFields(field.messageType.field, options);
-        }
-      } else {
-        // No field info for nested message, generate a simple object
-        result[field.name] = field.label === 'LABEL_REPEATED' ? [{}] : {};
-      }
-    } else if (field.type === 'TYPE_ENUM') {
-      result[field.name] = field.label === 'LABEL_REPEATED' ? [0] : 0;
-    } else {
-      // Generate value based on primitive type and name
-      let value;
+  const resolvedCtx = ctx || { messageMap: new Map(), expanding: new Set(), scope: '' };
 
-      switch (field.type) {
-        case 'TYPE_DOUBLE':
-        case 'TYPE_FLOAT':
-          value = faker.number.float({ min: 0, max: 1000, precision: 0.01 });
-          break;
-        case 'TYPE_INT32':
-        case 'TYPE_INT64':
-        case 'TYPE_SINT32':
-        case 'TYPE_SINT64':
-        case 'TYPE_UINT32':
-        case 'TYPE_UINT64':
-        case 'TYPE_FIXED32':
-        case 'TYPE_FIXED64':
-          value = faker.number.int({ min: 0, max: 1000 });
-          break;
-        case 'TYPE_BOOL':
-          value = faker.datatype.boolean();
-          break;
-        case 'TYPE_STRING':
-          value = faker.lorem.word();
-          break;
-        case 'TYPE_BYTES':
-          value = Buffer.from(faker.string.alpha({ length: { min: 5, max: 10 } })).toString('base64');
-          break;
-        default:
-          value = faker.lorem.word();
+  fields.forEach((field) => {
+    if (field.type === 'TYPE_MESSAGE') {
+      const resolved = resolveMessage(field.typeName, resolvedCtx);
+
+      if (resolved && isMapEntry(resolved.descriptor)) {
+        const keyField = resolved.descriptor.field?.find((f) => f.name === 'key');
+        const valueField = resolved.descriptor.field?.find((f) => f.name === 'value');
+        if (keyField && valueField) {
+          const count = options.arraySize || faker.number.int({ min: 1, max: 3 });
+          const obj = {};
+          for (let i = 0; i < count; i++) {
+            const key = String(generateSingleFieldValue(keyField, options, resolvedCtx));
+            obj[key] = generateSingleFieldValue(valueField, options, resolvedCtx);
+          }
+          result[field.name] = obj;
+          return;
+        }
       }
 
       if (field.label === 'LABEL_REPEATED') {
-        // Generate array of values
         const count = options.arraySize || faker.number.int({ min: 1, max: 3 });
-        result[field.name] = Array.from({ length: count }, () => value);
+        if (resolved && resolvedCtx.expanding.has(resolved.fqn)) {
+          // Cycle: don't re-expand inside the array, emit empty objects
+          result[field.name] = Array.from({ length: count }, () => ({}));
+        } else {
+          result[field.name] = Array.from({ length: count }, () =>
+            generateNestedMessage(field, options, resolvedCtx)
+          );
+        }
       } else {
-        result[field.name] = value;
+        result[field.name] = generateNestedMessage(field, options, resolvedCtx);
       }
+      return;
+    }
+
+    if (field.type === 'TYPE_ENUM') {
+      result[field.name] = field.label === 'LABEL_REPEATED' ? [0] : 0;
+      return;
+    }
+
+    const value = generateScalarValue(field.type);
+
+    if (field.label === 'LABEL_REPEATED') {
+      const count = options.arraySize || faker.number.int({ min: 1, max: 3 });
+      result[field.name] = Array.from({ length: count }, () => value);
+    } else {
+      result[field.name] = value;
     }
   });
 
@@ -86,7 +135,6 @@ const generateSampleMessageFromFields = (fields, options = {}) => {
  */
 const getMethodRequestFields = (method) => {
   try {
-    // Navigate through various potential property paths to find fields
     if (method.requestType?.type?.field) {
       return method.requestType.type.field;
     }
@@ -118,14 +166,30 @@ export const generateGrpcSampleMessage = (method, options = {}) => {
 
     const fields = getMethodRequestFields(method);
 
-    if (fields) {
-      return generateSampleMessageFromFields(fields, options);
+    if (!fields) {
+      return {};
     }
 
-    // If method exists but no field information could be extracted,
-    // generate a generic message that matches common patterns
-    return {};
+    const { messageMap } = buildDescriptorMaps(method.requestType?.fileDescriptorProtos);
+
+    let scope = '';
+    const requestTypeName = method.requestType?.type?.name;
+    if (requestTypeName) {
+      const entryResolved = resolveType(requestTypeName, '', messageMap);
+      if (entryResolved && entryResolved.kind === 'message') {
+        scope = entryResolved.fqn;
+      }
+    }
+
+    const ctx = {
+      messageMap,
+      expanding: new Set(scope ? [scope] : []),
+      scope
+    };
+
+    return generateSampleMessageFromFields(fields, options, ctx);
   } catch (error) {
     console.error('Error generating gRPC sample message:', error);
+    return {};
   }
 };
